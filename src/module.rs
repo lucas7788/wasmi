@@ -633,10 +633,10 @@ impl ModuleInstance {
         func_name: &str,
         args: &[RuntimeValue],
         externals: &mut E,
-    ) -> Result<Option<RuntimeValue>, Error> {
-        let func_instance = self.func_by_name(func_name)?;
+    ) -> Result<(Option<RuntimeValue>, u64), (Error, u64)> {
+        let func_instance = self.func_by_name(func_name).unwrap();
 
-        FuncInstance::invoke(&func_instance, args, externals).map_err(|t| Error::Trap(t))
+        FuncInstance::invoke(&func_instance, args, externals).map_err(|t| (Error::Trap(t.0), t.1))
     }
 
     /// Invoke exported function by a name using recycled stacks.
@@ -652,11 +652,11 @@ impl ModuleInstance {
         args: &[RuntimeValue],
         externals: &mut E,
         stack_recycler: &mut StackRecycler,
-    ) -> Result<Option<RuntimeValue>, Error> {
+    ) -> Result<(Option<RuntimeValue>, u64), Error> {
         let func_instance = self.func_by_name(func_name)?;
 
         FuncInstance::invoke_with_stack(&func_instance, args, externals, stack_recycler)
-            .map_err(|t| Error::Trap(t))
+            .map_err(|t| Error::Trap(t.0))
     }
 
     fn func_by_name(&self, func_name: &str) -> Result<FuncRef, Error> {
@@ -729,7 +729,7 @@ impl<'a> NotStartedModuleRef<'a> {
                 .instance
                 .func_by_index(start_fn_idx)
                 .expect("Due to validation start function should exists");
-            FuncInstance::invoke(&start_func, &[], state)?;
+            FuncInstance::invoke(&start_func, &[], state).unwrap();
         }
         Ok(self.instance)
     }

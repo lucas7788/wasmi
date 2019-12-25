@@ -5,12 +5,13 @@ use alloc::{
 };
 use core::fmt;
 use host::Externals;
-use isa;
 use module::ModuleInstance;
 use parity_wasm::elements::Local;
 use runner::{check_function_args, Interpreter, InterpreterState, StackRecycler};
+use std::sync::atomic::Ordering;
 use types::ValueType;
 use value::RuntimeValue;
+use {isa, NopExternals};
 use {Signature, Trap};
 
 /// Reference to a function (See [`FuncInstance`] for details).
@@ -138,17 +139,23 @@ impl FuncInstance {
         func: &FuncRef,
         args: &[RuntimeValue],
         externals: &mut E,
-    ) -> Result<Option<RuntimeValue>, Trap> {
-        check_function_args(func.signature(), &args)?;
+    ) -> Result<(Option<RuntimeValue>, u64), (Trap, u64)> {
+        check_function_args(func.signature(), &args).map(|r| (r, 0));
         match *func.as_internal() {
             FuncInstanceInternal::Internal { .. } => {
-                let mut interpreter = Interpreter::new(func, args, None)?;
+                let (mut interpreter, _) =
+                    Interpreter::new(func, args, None).map(|e| (e, 0)).unwrap();
                 interpreter.start_execution(externals)
             }
             FuncInstanceInternal::Host {
                 ref host_func_index,
                 ..
-            } => externals.invoke_index(*host_func_index, args.into()),
+            } => {
+                let res = externals
+                    .invoke_index(*host_func_index, args.into())
+                    .unwrap();
+                Ok((res, 0))
+            }
         }
     }
 
@@ -164,11 +171,13 @@ impl FuncInstance {
         args: &[RuntimeValue],
         externals: &mut E,
         stack_recycler: &mut StackRecycler,
-    ) -> Result<Option<RuntimeValue>, Trap> {
-        check_function_args(func.signature(), &args)?;
+    ) -> Result<(Option<RuntimeValue>, u64), (Trap, u64)> {
+        check_function_args(func.signature(), &args)
+            .map(|e| (e, 0))
+            .unwrap();
         match *func.as_internal() {
             FuncInstanceInternal::Internal { .. } => {
-                let mut interpreter = Interpreter::new(func, args, Some(stack_recycler))?;
+                let mut interpreter = Interpreter::new(func, args, Some(stack_recycler)).unwrap();
                 let return_value = interpreter.start_execution(externals);
                 stack_recycler.recycle(interpreter);
                 return_value
@@ -176,7 +185,12 @@ impl FuncInstance {
             FuncInstanceInternal::Host {
                 ref host_func_index,
                 ..
-            } => externals.invoke_index(*host_func_index, args.into()),
+            } => {
+                let res = externals
+                    .invoke_index(*host_func_index, args.into())
+                    .unwrap();
+                Ok((res, 0))
+            }
         }
     }
 
@@ -289,13 +303,13 @@ impl<'args> FuncInvocation<'args> {
     pub fn start_execution<'externals, E: Externals + 'externals>(
         &mut self,
         externals: &'externals mut E,
-    ) -> Result<Option<RuntimeValue>, ResumableError> {
+    ) -> Result<(Option<RuntimeValue>, u64), (ResumableError, u64)> {
         match self.kind {
             FuncInvocationKind::Internal(ref mut interpreter) => {
                 if interpreter.state() != &InterpreterState::Initialized {
-                    return Err(ResumableError::AlreadyStarted);
+                    return Err((ResumableError::AlreadyStarted, interpreter.get_gas_left()));
                 }
-                Ok(interpreter.start_execution(externals)?)
+                Ok(interpreter.start_execution(externals).unwrap())
             }
             FuncInvocationKind::Host {
                 ref args,
@@ -303,10 +317,15 @@ impl<'args> FuncInvocation<'args> {
                 ref host_func_index,
             } => {
                 if *finished {
-                    return Err(ResumableError::AlreadyStarted);
+                    return Err((ResumableError::AlreadyStarted, 0));
                 }
                 *finished = true;
-                Ok(externals.invoke_index(*host_func_index, args.as_ref().into())?)
+                Ok((
+                    externals
+                        .invoke_index(*host_func_index, args.as_ref().into())
+                        .unwrap(),
+                    0,
+                ))
             }
         }
     }

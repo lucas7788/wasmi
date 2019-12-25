@@ -10,6 +10,8 @@ use memory_units::Pages;
 use module::ModuleRef;
 use nan_preserving_float::{F32, F64};
 use parity_wasm::elements::Local;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use validation::{DEFAULT_MEMORY_INDEX, DEFAULT_TABLE_INDEX};
 use value::{
     ArithmeticOps, ExtendInto, Float, Integer, LittleEndianConvert, RuntimeValue, TransmuteInto,
@@ -168,6 +170,7 @@ pub struct Interpreter {
     call_stack: CallStack,
     return_type: Option<ValueType>,
     state: InterpreterState,
+    gas_left: u64,
 }
 
 impl Interpreter {
@@ -197,22 +200,28 @@ impl Interpreter {
             call_stack,
             return_type,
             state: InterpreterState::Initialized,
+            gas_left: 0,
         })
     }
-
+    pub fn get_gas_left(&self) -> u64 {
+        self.gas_left
+    }
     pub fn state(&self) -> &InterpreterState {
         &self.state
     }
-
+    fn check_gas_left(&mut self) {
+        self.gas_left += 1;
+    }
     pub fn start_execution<'a, E: Externals + 'a>(
         &mut self,
         externals: &'a mut E,
-    ) -> Result<Option<RuntimeValue>, Trap> {
+    ) -> Result<(Option<RuntimeValue>, u64), (Trap, u64)> {
         // Ensure that the VM has not been executed. This is checked in `FuncInvocation::start_execution`.
         assert!(self.state == InterpreterState::Initialized);
 
         self.state = InterpreterState::Started;
-        self.run_interpreter_loop(externals)?;
+        self.run_interpreter_loop(externals)
+            .map_err(|e| (e, self.gas_left))?;
 
         let opt_return_value = self
             .return_type
@@ -221,7 +230,7 @@ impl Interpreter {
         // Ensure that stack is empty after the execution. This is guaranteed by the validation properties.
         assert!(self.value_stack.len() == 0);
 
-        Ok(opt_return_value)
+        Ok((opt_return_value, self.gas_left))
     }
 
     pub fn resume_execution<'a, E: Externals + 'a>(
@@ -305,8 +314,8 @@ impl Interpreter {
 
                             let return_val =
                                 match FuncInstance::invoke(&nested_func, &args, externals) {
-                                    Ok(val) => val,
-                                    Err(trap) => {
+                                    Ok(val) => val.0,
+                                    Err((trap, gas)) => {
                                         if trap.kind().is_host() {
                                             self.state = InterpreterState::Resumable(
                                                 nested_func.signature().return_type(),
@@ -375,6 +384,7 @@ impl Interpreter {
         context: &mut FunctionContext,
         instruction: &isa::Instruction,
     ) -> Result<InstructionOutcome, TrapKind> {
+        self.check_gas_left();
         match instruction {
             &isa::Instruction::Unreachable => self.run_unreachable(context),
 
